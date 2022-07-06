@@ -25,8 +25,8 @@ sealed trait ApiCommand extends Command {
   def uri: Uri
   def body: Json
   def method: Method
-  def toRequest: Request[IO] =
-    Request(uri = uri, method = method).withEntity(body).putHeaders(`Content-Type`(MediaType.application.json))
+  def toRequest[F[_]]: Request[F] =
+    Request[F](uri = uri, method = method).withEntity(body).putHeaders(`Content-Type`(MediaType.application.json))
 }
 
 sealed trait GatewayCommand extends Command {

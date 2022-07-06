@@ -1,6 +1,9 @@
 package volk.discord
 
-import cats.effect.IO
+import cats._
+import cats.implicits._
+import cats.effect._
+import cats.effect.kernel.Async
 import cats.implicits.toTraverseOps
 import fs2.concurrent.Topic
 import io.circe.Json
@@ -15,66 +18,68 @@ import volk.discord.gateway.{DiscordBotConfig, Gateway}
 
 object Discord {
 
-  import scribe.cats.{io => scribe}
+  import scribe.{cats => scribe}
 
-  def simpleBot(
+  def simpleBot[F[_]: Async: Concurrent: Parallel](
       config: DiscordBotConfig
-  )(receiveThrough: PartialFunction[Event, IO[List[Command]]]): IO[Unit] =
+  )(receiveThrough: PartialFunction[Event, F[List[Command]]]): F[Unit] =
     bot(config, None)(receiveThrough)
 
-  def concurrentBot(config: DiscordBotConfig, commandTopic: Topic[IO, Command])(
-      receiveThrough: PartialFunction[Event, IO[List[Command]]]
-  ): IO[Unit] =
+  def concurrentBot[F[_]: Async: Concurrent: Parallel](config: DiscordBotConfig, commandTopic: Topic[F, Command])(
+      receiveThrough: PartialFunction[Event, F[List[Command]]]
+  ): F[Unit] =
     bot(config, Some(commandTopic))(receiveThrough)
 
-  private def bot(
+  private def bot[F[_]: Async: Concurrent: Parallel](
       config: DiscordBotConfig,
-      outsideTopic: Option[Topic[IO, Command]]
+      outsideTopic: Option[Topic[F, Command]]
   )(
-      receiveThrough: PartialFunction[Event, IO[List[Command]]]
-  ): IO[Unit] = {
+      receiveThrough: PartialFunction[Event, F[List[Command]]]
+  ): F[Unit] = {
+    val scribeF = scribe[F]
     for {
-      t <- Topic[IO, DiscordPayload]
-      _ <- JdkHttpClient
-        .simple[IO]
-        .use { client =>
-          def handleCommand: Command => IO[Boolean] = {
-            case c: GatewayCommand =>
-              t.publish1(c.toPayload).map(_.isRight)
-            case command: ApiCommand =>
-              val req = command.toRequest.putHeaders(
-                Header.Raw(Authorization.name, config.botToken)
-              )
-              client.expect[Json](req).attempt.flatMap {
-                case Left(value) =>
-                  scribe
-                    .error(s"command $command failed: ${value.getMessage}")
-                    .as(false)
-                case Right(_) => IO.pure(true)
-              }
-          }
-
-          val gateway =
-            Gateway
-              .createAndRunGateway[Int](config)(
-                t,
-                {
-                  case (s, p: Event) =>
-                    receiveThrough
-                      .applyOrElse[Event, IO[List[Command]]](
-                        p,
-                        _ => IO.pure(Nil)
-                      )
-                      .flatMap(_.traverse(handleCommand))
-                      .as(s -> Nil)
-                  case (s, _) => IO.pure(s -> Nil)
+      t <- Topic[F, DiscordPayload]
+      _ <-
+        JdkHttpClient
+          .simple[F]
+          .use { client =>
+            def handleCommand: Command => F[Boolean] = {
+              case c: GatewayCommand =>
+                t.publish1(c.toPayload).map(_.isRight)
+              case command: ApiCommand =>
+                val req = command.toRequest[F].putHeaders(
+                  Header.Raw(Authorization.name, config.botToken)
+                )
+                client.expect[Json](req).attempt.flatMap {
+                  case Left(value) =>
+                    scribeF
+                      .error(s"command $command failed: ${value.getMessage}")
+                      .as(false)
+                  case Right(_) => Monad[F].pure(true)
                 }
-              )(0)
+            }
 
-          outsideTopic
-            .map(_.subscribe(10).evalMap(handleCommand).compile.drain)
-            .fold(gateway)(gateway &> _)
-        }
+            val gateway =
+              Gateway
+                .createAndRunGateway[F, Int](config)(
+                  t,
+                  {
+                    case (s, p: Event) =>
+                      receiveThrough
+                        .applyOrElse[Event, F[List[Command]]](
+                          p,
+                          _ => Monad[F].pure(Nil)
+                        )
+                        .flatMap(_.traverse(handleCommand))
+                        .as(s -> Nil)
+                    case (s, _) => Monad[F].pure(s -> Nil)
+                  }
+                )(0)
+
+            outsideTopic
+              .map(_.subscribe(10).evalMap(handleCommand).compile.drain)
+              .fold(gateway)(gateway &> _)
+          }
     } yield ()
   }
 

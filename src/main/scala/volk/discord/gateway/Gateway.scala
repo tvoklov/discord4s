@@ -1,6 +1,8 @@
 package volk.discord.gateway
 
-import cats.effect.{IO, Ref}
+import cats.Monad
+import cats.effect.kernel.Async
+import cats.effect.{Concurrent, IO, Ref}
 import cats.implicits._
 import fs2.concurrent.{SignallingRef, Topic}
 import org.http4s.client.websocket.{WSFrame, WSRequest}
@@ -17,7 +19,7 @@ import volk.discord.gateway.payload._
 import scala.concurrent.duration.DurationInt
 
 object Gateway {
-  import scribe.cats.{io => scribe}
+  import scribe.{cats => scribe}
 
   private object uri {
     val gatewayBot = uri"https://discord.com/api/v10/gateway/bot"
@@ -27,47 +29,52 @@ object Gateway {
       url: String
   )
 
-  def createAndRunGateway[S](config: DiscordBotConfig)(
-      sendFrom: Topic[IO, DiscordPayload],
-      receiveThrough: PartialFunction[(S, DiscordPayload), IO[
+  def createAndRunGateway[F[_]: Async, S](config: DiscordBotConfig)(
+      sendFrom: Topic[F, DiscordPayload],
+      receiveThrough: PartialFunction[(S, DiscordPayload), F[
         (S, List[DiscordPayload])
       ]]
-  )(zeroState: S): IO[Unit] = {
+  )(zeroState: S): F[Unit] = {
     for {
-      uri <- JdkHttpClient
-        .simple[IO]
-        .use(
-          _.expect[GatewayAddressResponse](
-            Request(
-              uri = uri.gatewayBot,
-              headers = Headers(
-                Header.Raw(Authorization.name, config.botToken)
-              ),
-              method = Method.GET
+      uri <-
+        JdkHttpClient
+          .simple[F]
+          .use(
+            _.expect[GatewayAddressResponse](
+              Request[F](
+                uri = uri.gatewayBot,
+                headers = Headers(
+                  Header.Raw(Authorization.name, config.botToken)
+                ),
+                method = Method.GET
+              )
             )
-          ).map(_.url).map(Uri.fromString).rethrow
-        )
+              .map(_.url)
+              .map(Uri.fromString)
+              .rethrow
+          )
 
       _ <- runGateway(uri, config)(sendFrom, receiveThrough)(zeroState)
     } yield ()
   }
 
-  def runGateway[S](uri: Uri, config: DiscordBotConfig)(
-      sendFrom: Topic[IO, DiscordPayload],
-      receiveThrough: PartialFunction[(S, DiscordPayload), IO[
+  def runGateway[F[_]: Async, S](uri: Uri, config: DiscordBotConfig)(
+      sendFrom: Topic[F, DiscordPayload],
+      receiveThrough: PartialFunction[(S, DiscordPayload), F[
         (S, List[DiscordPayload])
       ]]
-  )(zeroState: S): IO[Unit] = {
+  )(zeroState: S): F[Unit] = {
+    val scribeF = scribe[F]
     for {
-      intState <- SignallingRef[IO, InternalDiscordState](
+      intState <- SignallingRef[F, InternalDiscordState](
         InternalDiscordState(None, None, None)
       )
-      outerState <- Ref.of[IO, S](zeroState)
+      outerState <- Ref.of[F, S](zeroState)
 
-      stopAndReconnect <- SignallingRef[IO, (Boolean, Boolean)]((false, true))
+      stopAndReconnect <- SignallingRef[F, (Boolean, Boolean)]((false, true))
 
       _ <- {
-        def process: PartialFunction[DiscordPayload, IO[
+        def process: PartialFunction[DiscordPayload, F[
           List[DiscordPayload]
         ]] = {
           case internal.Hello(heartbeatInterval) =>
@@ -97,40 +104,40 @@ object Gateway {
               _ <- stopAndReconnect.update(_.copy(_2 = true))
             } yield internal.InternalDisconnect(true) :: Nil
 
-          case internal.HeartbeatAck() => IO.pure(Nil)
+          case internal.HeartbeatAck() => Monad[F].pure(Nil)
         }
 
         JdkWSClient
-          .simple[IO]
+          .simple[F]
           .flatMap(_.connectHighLevel(WSRequest(uri)))
           .use { conn =>
             val receive =
               conn.receiveStream
                 .evalTap(frame =>
-                  scribe.debug("got frame from discord ", frame.toString)
+                  scribeF.debug("got frame from discord ", frame.toString)
                 )
                 .evalMapAccumulate(zeroState) {
                   case (state, WSFrame.Text(text, _)) =>
                     DiscordPayload.fromWebsocketFrame(text) match {
                       case Left(value) =>
-                        scribe
+                        scribeF
                           .error(s"Discord sent weird payload: $text", value)
-                          .as(state -> Nil)
+                          .as(state -> List.empty[DiscordPayload])
                       case Right(payload) =>
                         process
                           .andThen(_.map(state -> _))
                           .orElse(
                             PartialFunction
-                              .fromFunction[DiscordPayload, IO[
+                              .fromFunction[DiscordPayload, F[
                                 (S, List[DiscordPayload])
                               ]](receiveThrough.compose(state -> _))
                           )
                           .apply(payload)
                     }
                   case (state, frame) =>
-                    scribe
+                    scribeF
                       .error(s"what am i supposed to do with $frame")
-                      .as(state -> Nil)
+                      .as(state -> List.empty[DiscordPayload])
                 }
                 .evalMap { case (state, payloads) =>
                   payloads
@@ -139,10 +146,10 @@ object Gateway {
                         for {
                           _ <- outerState.set(state)
                           _ <- stopAndReconnect.set((true, shouldReconnect))
-                        } yield None
+                        } yield Option.empty[WSFrame.Text]
                       case payload =>
-                        IO.pure(
-                          Some(
+                        Monad[F].pure(
+                          Option(
                             WSFrame
                               .Text(payload.asJson(messageEncoder).noSpaces)
                           )
@@ -159,7 +166,7 @@ object Gateway {
                 .take(1)
                 .flatMap { heartbeat =>
                   fs2.Stream
-                    .awakeEvery[IO](heartbeat.milliseconds)
+                    .awakeEvery[F](heartbeat.milliseconds)
                     .evalMap(_ =>
                       for {
                         s <- intState.getAndUpdate(_.incHeartbeatSequenceNum)
@@ -176,7 +183,7 @@ object Gateway {
                 .merge(receive)
                 .merge(heartbeat)
                 .evalTap { frame =>
-                  scribe.debug("sent frame to discord ", frame.toString)
+                  scribeF.debug("sent frame to discord ", frame.toString)
                 }
 
             send.through(conn.sendPipe).compile.drain
@@ -188,7 +195,7 @@ object Gateway {
           sar <- stopAndReconnect.get
           (_, reconnect) = sar
           r <-
-            if (!reconnect) IO.unit
+            if (!reconnect) Async[F].unit
             else
               for {
                 os <- outerState.get

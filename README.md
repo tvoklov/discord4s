@@ -1,6 +1,6 @@
 ## What is this?
 
-a library for making discord bots using scala
+an FP scala library for making discord bots
 
 ## Why is this?
 
@@ -8,12 +8,12 @@ because I didn't like any other library that could be used in scala
 
 ## Should I use this?
 
-eh, depends. bear in mind that this is an extremely rough draft and it's unfinished. use at your own risk.
+eh, depends. bear in mind that this might be rough around the edges, and also it's unfinished. use at your own risk.
 
 ## Will you finish it?
 
-idk, maybe?
+maybe?
 
-## Why is it locked into cats-effects' IO and not using a more general effect monad?
+## What is left to finish?
 
-sorry
+seemingly, just the types of events discord sends over the gateway and the commands you can send.
