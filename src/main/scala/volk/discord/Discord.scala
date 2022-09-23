@@ -20,13 +20,18 @@ object Discord {
 
   import scribe.{cats => scribe}
 
+  type EventProcessor[F[_]] = PartialFunction[Event, F[List[Command]]]
+
   def simpleBot[F[_]: Async: Concurrent: Parallel](
       config: DiscordBotConfig
-  )(receiveThrough: PartialFunction[Event, F[List[Command]]]): F[Unit] =
+  )(receiveThrough: EventProcessor[F]): F[Unit] =
     bot(config, None)(receiveThrough)
 
-  def concurrentBot[F[_]: Async: Concurrent: Parallel](config: DiscordBotConfig, commandTopic: Topic[F, Command])(
-      receiveThrough: PartialFunction[Event, F[List[Command]]]
+  def concurrentBot[F[_]: Async: Concurrent: Parallel](
+      config: DiscordBotConfig,
+      commandTopic: Topic[F, Command]
+  )(
+      receiveThrough: EventProcessor[F]
   ): F[Unit] =
     bot(config, Some(commandTopic))(receiveThrough)
 
@@ -34,7 +39,7 @@ object Discord {
       config: DiscordBotConfig,
       outsideTopic: Option[Topic[F, Command]]
   )(
-      receiveThrough: PartialFunction[Event, F[List[Command]]]
+      receiveThrough: EventProcessor[F]
   ): F[Unit] = {
     val scribeF = scribe[F]
     for {
@@ -47,9 +52,12 @@ object Discord {
               case c: GatewayCommand =>
                 t.publish1(c.toPayload).map(_.isRight)
               case command: ApiCommand =>
-                val req = command.toRequest[F].putHeaders(
-                  Header.Raw(Authorization.name, config.botToken)
-                )
+                val req =
+                  command
+                    .toRequest[F]
+                    .putHeaders(
+                      Header.Raw(Authorization.name, config.botToken)
+                    )
                 client.expect[Json](req).attempt.flatMap {
                   case Left(value) =>
                     scribeF
