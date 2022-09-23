@@ -1,18 +1,18 @@
 ## What is this?
 
-an FP scala library for making discord bots
+a scala library for making discord bots using pure functional programming
+
+## How to use this?
+
+[here](https://github.com/tvoklov/discord4s/wiki/Usage-example)
 
 ## Why is this?
 
-because I didn't like any other library that could be used in scala
+because I didn't like any other library that could be used in scala and wanted to write my own
 
 ## Should I use this?
 
-eh, depends. bear in mind that this might be rough around the edges, and also it's unfinished. use at your own risk.
-
-## Will you finish it?
-
-maybe?
+this might be rough around the edges, and also kinda unfinished. use at your own risk.
 
 ## What is left to finish?
 
